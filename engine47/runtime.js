@@ -1,11 +1,13 @@
 import {
+  compileCompute,
   createEmptyStorage,
   createUniform,
 } from '../kernels/gpu.js';
 import { NANO4B, LAYER_TYPES } from '../engine/config.js';
 import { q4Meta } from '../engine/weights.js';
-import gemvF32Wgsl from '../kernels47/gemv_f32.wgsl?raw';
-import gemvF16Wgsl from '../kernels47/gemv_f16.wgsl?raw';
+import gemvWgsl from '../kernels/matmul_nbits_sg.wgsl?raw';
+import gemv32Wgsl from '../kernels/matmul_nbits_sg32.wgsl?raw';
+import gemvF16Wgsl from '../kernels/matmul_nbits_sg_f16.wgsl?raw';
 import ssdWgsl from '../kernels47/mamba_ssd.wgsl?raw';
 import rmsWgsl from '../kernels/rms.wgsl?raw';
 import addWgsl from '../kernels/add.wgsl?raw';
@@ -16,7 +18,6 @@ import attnWgsl from '../kernels/sparse_attn.wgsl?raw';
 import embedWgsl from '../kernels/embed_q4.wgsl?raw';
 import argmaxPartialWgsl from '../kernels/argmax_partial.wgsl?raw';
 import argmaxMergeWgsl from '../kernels/argmax_merge.wgsl?raw';
-import { colsPerWorkgroup, probeSubgroupSize } from './subgroup.js';
 
 const C = NANO4B;
 const INNER = C.mambaHeads * C.mambaHeadDim;
@@ -68,14 +69,6 @@ async function shaderModule(device, code, label) {
   return module;
 }
 
-function specialize(device, module, label, constants) {
-  return device.createComputePipeline({
-    label,
-    layout: 'auto',
-    compute: { module, entryPoint: 'main', constants },
-  });
-}
-
 export class DecodeEngine47 {
   constructor(gpu, weights) {
     this.gpu = gpu;
@@ -105,28 +98,18 @@ export class DecodeEngine47 {
 
   async _compile() {
     const d = this.device;
-    this.subgroupSize = await probeSubgroupSize(d);
-    this.colsPerWg = colsPerWorkgroup(this.subgroupSize);
-    const f32mod = await shaderModule(d, gemvF32Wgsl, 'gemv47-f32');
     const f16 = d.features.has('shader-f16');
-    const f16mod = f16 ? await shaderModule(d, gemvF16Wgsl, 'gemv47-f16') : null;
-    this.pipelines = new Map();
-    const add = (kind, mod, nb, epilogue) => {
-      const key = `${kind}:${nb}:${epilogue}`;
-      this.pipelines.set(key, specialize(d, mod, key, { N_BLOCKS: nb, EPILOGUE: epilogue }));
-    };
-    for (const nb of [98, 160, 240, 392]) add('f32', f32mod, nb, 0);
-    add('f32', f32mod, 98, 1);
-    if (f16mod) {
-      add('f16', f16mod, 98, 1);
-      add('f16', f16mod, 392, 0);
-    }
     const compileOne = async (code, label) => {
       const module = await shaderModule(d, code, label);
       return d.createComputePipeline({ label, layout: 'auto', compute: { module, entryPoint: 'main' } });
     };
+    // GEMV grids are the 4.6 per-shape picks. The 64-column schedule lost on
+    // MLP and on the sg4 projections, and did not beat sg32 on mamba in_proj.
     this.p = {
       f16,
+      gemv: (await compileCompute(d, gemvWgsl, 'gemv-sg4')).pipeline,
+      gemv32: (await compileCompute(d, gemv32Wgsl, 'gemv-sg32')).pipeline,
+      gemvF16: f16 ? (await compileCompute(d, gemvF16Wgsl, 'gemv-sg4-f16')).pipeline : null,
       rms: await compileOne(rmsWgsl, 'rms'),
       add: await compileOne(addWgsl, 'add'),
       conv: await compileOne(convWgsl, 'conv1d'),
@@ -138,6 +121,7 @@ export class DecodeEngine47 {
       argmax0: await compileOne(argmaxPartialWgsl, 'argmax-partial'),
       argmax1: await compileOne(argmaxMergeWgsl, 'argmax-merge'),
     };
+    this.gemvSchedule = 'f16-sg4 mlp, sg32 in_proj, sg4 else';
   }
 
   _alloc() {
@@ -239,28 +223,32 @@ export class DecodeEngine47 {
     this.gemvU = new Map();
   }
 
-  gemvParams(N) {
-    const key = N;
-    if (!this.gemvU.has(key)) this.gemvU.set(key, uniformU32(this.device, [N, 0, 0, 0]));
+  gemvParams(K, N, nBlocks, epilogue = 0) {
+    const key = `${K}:${N}:${nBlocks}:${epilogue}`;
+    if (!this.gemvU.has(key)) {
+      this.gemvU.set(key, uniformU32(this.device, [K, N, nBlocks, epilogue]));
+    }
     return this.gemvU.get(key);
   }
 
-  gemvPipeline(q4, epilogue) {
-    const mlpUp = q4.N === C.intermediate && q4.K === C.hidden;
-    const mlpDown = q4.K === C.intermediate && q4.N === C.hidden;
-    const kind = this.p.f16 && (mlpUp || mlpDown) ? 'f16' : 'f32';
-    const key = `${kind}:${q4.nBlocks}:${epilogue}`;
-    const pipeline = this.pipelines.get(key);
-    if (!pipeline) {
-      throw new Error(`no gemv pipeline ${key} (N=${q4.N} K=${q4.K})`);
+  gemvPick(q4) {
+    if (this.p.gemvF16 && q4.N === C.intermediate && q4.K === C.hidden) {
+      return { pipeline: this.p.gemvF16, cols: 4 };
     }
-    return pipeline;
+    if (this.p.gemvF16 && q4.K === C.intermediate && q4.N === C.hidden) {
+      return { pipeline: this.p.gemvF16, cols: 4 };
+    }
+    if (q4.K === C.hidden && q4.N >= 8192 && q4.N < 65536) {
+      return { pipeline: this.p.gemv32, cols: 8 };
+    }
+    return { pipeline: this.p.gemv, cols: 4 };
   }
 
   gemvBg(A, q4, Y, label, epilogue = 0) {
-    const pipeline = this.gemvPipeline(q4, epilogue);
+    const { pipeline, cols } = this.gemvPick(q4);
     return {
       pipeline,
+      cols,
       N: q4.N,
       bg: bg(this.device, pipeline, [
         A,
@@ -268,7 +256,7 @@ export class DecodeEngine47 {
         q4.scales,
         q4.zp,
         Y,
-        this.gemvParams(q4.N),
+        this.gemvParams(q4.K, q4.N, q4.nBlocks, epilogue),
       ], label),
     };
   }
@@ -381,7 +369,7 @@ export class DecodeEngine47 {
   }
 
   _gemvOp(g, label) {
-    return { p: g.pipeline, bg: g.bg, wg: Math.ceil(g.N / this.colsPerWg), label };
+    return { p: g.pipeline, bg: g.bg, wg: Math.ceil(g.N / g.cols), label };
   }
 
   _ops() {
