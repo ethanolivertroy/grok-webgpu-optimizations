@@ -33,22 +33,38 @@ export async function requestGpu({ forceFallback = false } = {}) {
   if (adapter.features.has('chromium-experimental-subgroup-matrix')) {
     requiredFeatures.push('chromium-experimental-subgroup-matrix');
   }
-  const device = await adapter.requestDevice({
-    requiredFeatures,
-    requiredLimits: {
-      maxComputeWorkgroupSizeX: Math.min(256, adapter.limits.maxComputeWorkgroupSizeX),
-      maxComputeInvocationsPerWorkgroup: Math.min(
-        256,
-        adapter.limits.maxComputeInvocationsPerWorkgroup,
-      ),
-      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-      maxBufferSize: adapter.limits.maxBufferSize,
-      maxStorageBuffersPerShaderStage: Math.min(
-        10,
-        adapter.limits.maxStorageBuffersPerShaderStage,
-      ),
-    },
-  });
+  const requiredLimits = {
+    maxComputeWorkgroupSizeX: Math.min(256, adapter.limits.maxComputeWorkgroupSizeX),
+    maxComputeInvocationsPerWorkgroup: Math.min(
+      256,
+      adapter.limits.maxComputeInvocationsPerWorkgroup,
+    ),
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    maxBufferSize: adapter.limits.maxBufferSize,
+    maxStorageBuffersPerShaderStage: Math.min(
+      10,
+      adapter.limits.maxStorageBuffersPerShaderStage,
+    ),
+  };
+  // Pin simd width at 32 when the adapter allows it. Both GEMV kernels
+  // (4.6 shuffle-xor and 4.7 subgroupAdd) assume a 32-lane subgroup.
+  // Requesting min and max equal asks the device to fix the size.
+  const pinned = { ...requiredLimits };
+  if (adapter.features.has('subgroups')) {
+    const mn = adapter.limits.minSubgroupSize;
+    const mx = adapter.limits.maxSubgroupSize;
+    if (mn <= 32 && mx >= 32) {
+      pinned.minSubgroupSize = 32;
+      pinned.maxSubgroupSize = 32;
+    }
+  }
+  let device;
+  try {
+    device = await adapter.requestDevice({ requiredFeatures, requiredLimits: pinned });
+  } catch (err) {
+    if (pinned.minSubgroupSize == null) throw err;
+    device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+  }
   device.addEventListener('uncapturederror', (e) => {
     console.error('GPU uncaptured error', e.error);
   });

@@ -119,6 +119,8 @@ export default defineConfig({
             charts: path.join(root, 'charts/chart.html'),
             engine: path.join(root, 'bench/engine.html'),
             decode: path.join(root, 'bench/decode.html'),
+            compare: path.join(root, 'bench/compare.html'),
+            check47: path.join(root, 'bench/check47.html'),
           },
     },
   },

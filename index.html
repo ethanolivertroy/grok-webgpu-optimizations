@@ -49,6 +49,9 @@
       object-fit: cover;
     }
     .nums { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .vs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .vs .card b { font-size: 1.05rem; }
+    .vs .card em { font-style: normal; color: var(--acc); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -180,8 +183,12 @@
     </p>
     <div class="nums">
       <div class="card"><b>70</b><span>stock ORT</span></div>
-      <div class="card"><b>115</b><span>engine wall</span></div>
-      <div class="card"><b>142</b><span>engine GPU</span></div>
+      <div class="card"><b>115</b><span>4.6 wall</span></div>
+      <div class="card"><b>142</b><span>4.6 GPU</span></div>
+    </div>
+    <div class="vs">
+      <div class="card"><em>Grok 4.6</em><b>115 wall</b><span>measured on M5 Max</span></div>
+      <div class="card"><em>Grok 4.7</em><b>same bench</b><span><a href="./bench/compare.html">run side by side</a></span></div>
     </div>
     <p class="warn" id="gpuWarn">Needs Chrome (or Edge) with WebGPU. Safari is not enough.</p>
     <p class="load-note">
@@ -192,7 +199,8 @@
     <button id="loadBtn" type="button">Load model</button>
     <div class="bar" aria-hidden="true"><i id="bar"></i></div>
     <p class="credit">
-      Kernels and decode engine written by Grok 4.6 in Cursor.
+      4.6 kernels by Grok 4.6. 4.7 GEMV and Mamba SSD by Grok 4.7.
+      <a href="./bench/compare.html">Compare</a>.
       <a href="https://github.com/ethanolivertroy/nemotron-webgpu-decode">Source</a>
     </p>
   </aside>
