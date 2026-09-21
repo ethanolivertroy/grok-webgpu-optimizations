@@ -13,7 +13,7 @@
     "story": "node scripts/record-story.mjs"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.1.0"
+    "@huggingface/transformers": "^4.3.0"
   },
   "devDependencies": {
     "playwright-core": "^1.62.1",
