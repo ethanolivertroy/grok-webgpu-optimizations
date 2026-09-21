@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Grok 4.6 vs 4.7 · Nemotron decode</title>
+  <style>
+    :root { --bg: #000; --fg: #f4f4f5; --mut: #a7a9ac; --acc: #f54e00; --fill: #005288; --line: #1c1c1c; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font-family: ui-sans-serif, system-ui, sans-serif; }
+    a { color: var(--acc); }
+    header { padding: 28px 28px 8px; max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin: 8px 0; }
+    .kicker { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--acc); font-weight: 700; }
+    .lede { color: var(--mut); max-width: 68ch; line-height: 1.5; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 8px 28px 24px; max-width: 1100px; margin: 0 auto; }
+    .card { border: 1px solid var(--line); border-radius: 12px; padding: 16px 16px 12px; background: #0a0a0a; min-height: 220px; }
+    .card h2 { margin: 0 0 4px; font-size: 1rem; }
+    .who { color: var(--mut); font-size: 13px; margin-bottom: 12px; }
+    .nums { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .num b { display: block; font-size: 2rem; font-variant-numeric: tabular-nums; }
+    .num span { color: var(--mut); font-size: 12px; }
+    .out { margin-top: 12px; color: #ddd; font-size: 14px; line-height: 1.45; white-space: pre-wrap; }
+    .meta { color: var(--mut); font-size: 12px; margin-top: 8px; }
+    .bars { max-width: 1100px; margin: 0 auto; padding: 0 28px 12px; }
+    .bar-row { display: grid; grid-template-columns: 140px 1fr 64px; gap: 10px; align-items: center; margin: 6px 0; font-size: 13px; }
+    .track { height: 10px; background: #161616; border-radius: 99px; overflow: hidden; }
+    .track i { display: block; height: 100%; width: 0; }
+    .notes { max-width: 1100px; margin: 0 auto; padding: 8px 28px 32px; color: var(--mut); font-size: 14px; line-height: 1.5; }
+    .notes ul { margin: 8px 0 0; padding-left: 18px; }
+    #log { max-width: 1100px; margin: 0 auto 32px; padding: 0 28px; color: #8d8f93; font-size: 12px; white-space: pre-wrap; }
+    #status { color: var(--acc); }
+    @media (max-width: 800px) {
+      .grid { grid-template-columns: 1fr; }
+      .bar-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="kicker">Nemotron 3 Nano 4B q4 · Chrome / WebGPU</div>
+    <h1>Grok 4.6 and Grok 4.7, same decode</h1>
+    <p class="lede">
+      Same weights, same chat template, same 128 greedy tokens. 4.6 is the
+      measured engine: 115 tok/s wall and 142 tok/s GPU on an M5 Max. 4.7
+      keeps that loop and replaces the GEMV schedule and the Mamba SSD launch.
+      Bars below mix the published M5 numbers with whatever this GPU just ran.
+      A software WebGPU adapter is not a tok/s result.
+    </p>
+    <p class="lede">Machine: <span id="machine">…</span> · <span id="status">starting</span></p>
+    <p class="lede"><a href="../">Chat</a> · <a href="./decode.html">4.6 bench</a> · <a href="./check47.html">4.7 numeric check</a></p>
+  </header>
+  <section class="grid">
+    <article class="card">
+      <h2>Grok 4.6</h2>
+      <div class="who">Published M5 Max: 115 wall, 142 GPU. This run:</div>
+      <div class="nums">
+        <div class="num"><b id="c46-wall">…</b><span>wall tok/s</span></div>
+        <div class="num"><b id="c46-gpu">…</b><span>GPU tok/s</span></div>
+      </div>
+      <div class="meta" id="c46-ms"></div>
+      <div class="out" id="c46-out"></div>
+    </article>
+    <article class="card">
+      <h2>Grok 4.7</h2>
+      <div class="who">New GEMV schedule, one thread per Mamba state. This run:</div>
+      <div class="nums">
+        <div class="num"><b id="c47-wall">…</b><span>wall tok/s</span></div>
+        <div class="num"><b id="c47-gpu">…</b><span>GPU tok/s</span></div>
+      </div>
+      <div class="meta" id="c47-ms"></div>
+      <div class="out" id="c47-out"></div>
+    </article>
+  </section>
+  <div class="bars" id="bars"></div>
+  <p class="notes" id="agree"></p>
+  <div class="notes">
+    <b style="color:#f4f4f5">What 4.7 changes</b>
+    <ul>
+      <li>GEMV workgroup is 256 threads, 8 columns per subgroup, every lane walks K. On Metal (subgroup 32) that is 64 columns per workgroup. 4.6 sg4 spent 256 threads on 4 columns, and on K=3136 most of those lanes had no block.</li>
+      <li>MLP stays f16 per block with an f32 sum, relu2 fused into the up projection, same policy as 4.6.</li>
+      <li>Mamba SSD is one thread per (head, dim) with vec4 state updates. 4.6 launched 7680 barrier reductions per layer.</li>
+      <li>The K split follows the device subgroup width. Metal is 32 lanes. The bench asks for that when the adapter allows it.</li>
+    </ul>
+  </div>
+  <pre id="log"></pre>
+  <script type="module" src="./compare.js"></script>
+</body>
+</html>

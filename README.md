@@ -11,7 +11,9 @@ real language, not a run of newlines.
 In-browser chat:
 [ethanolivertroy/nemotron-3-nano-webgpu-kernels](https://huggingface.co/spaces/ethanolivertroy/nemotron-3-nano-webgpu-kernels).
 
-Kernels and the decode engine were written by **Grok 4.6** in Cursor.
+The 4.6 kernels and decode engine were written by **Grok 4.6**.
+The 4.7 GEMV schedule and Mamba SSD sit beside them. Run both:
+[bench/compare.html](bench/compare.html).
 
 https://github.com/user-attachments/assets/3de8c1e7-9fb7-494a-92dc-dddf464361ab
 
@@ -55,8 +57,10 @@ npm run dev
 Open:
 
 - Chat: http://127.0.0.1:5173/
+- 4.6 vs 4.7: http://127.0.0.1:5173/bench/compare.html
 - Full-model decode bench: http://127.0.0.1:5173/bench/decode.html
 - GEMV microbench: http://127.0.0.1:5173/bench/engine.html
+- 4.7 numeric check: http://127.0.0.1:5173/bench/check47.html
 - Charts: http://127.0.0.1:5173/charts/chart.html
 
 Weights come from
@@ -127,4 +131,33 @@ harness/    result JSON (weights are gitignored)
 
 More numbers: [kernels/RESULTS.md](kernels/RESULTS.md).
 
-Written by Grok 4.6. MIT license.
+## Grok 4.6 vs Grok 4.7
+
+4.6 is the measured engine: **115 tok/s** wall, **142 tok/s** GPU, M5 Max,
+Chrome 151, Metal, chat template, 128 greedy tokens.
+
+4.7 uses the same weights, the same greedy loop, and the same bench.
+It does not invent a new tok/s. Run it on the machine you care about.
+
+What changed:
+
+- GEMV workgroup is 256 threads. Each subgroup owns 8 columns, and every
+  lane walks K. On Metal (subgroup 32) that is 8 subgroups and 64 columns
+  per workgroup. The 4.6 sg4 kernel used those 256 threads for 4 columns,
+  so on K=3136 (98 blocks) most lanes did nothing and then joined a reduce.
+- MLP stays on f16 dots with an f32 sum of blocks, relu2 fused into the
+  up projection. Same policy as 4.6.
+- Mamba SSD is one thread per (head, dim), state in vec4s, no barrier.
+  4.6 launched a 32-thread workgroup per element (7680 per layer).
+- The K split follows the device subgroup width. We still ask for 32
+  when the adapter allows it, which is Metal.
+
+```bash
+node scripts/headless-bench.mjs --page compare --tokens 128 --angle metal
+node scripts/headless-bench.mjs --page check --angle swiftshader
+```
+
+`check` is a numeric compare of the new GEMV and SSD against a CPU
+reference. It is not a tok/s number. SwiftShader is not either.
+
+Written by Grok 4.6 and Grok 4.7. MIT license.

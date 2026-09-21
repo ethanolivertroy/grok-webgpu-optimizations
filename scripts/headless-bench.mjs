@@ -223,6 +223,15 @@ async function main() {
       cfg.headed,
     );
     if (json) out.results.push(json);
+  } else if (cfg.page === 'check') {
+    const json = await runChromePage(
+      `${base}/bench/check47.html`,
+      profileDir,
+      cfg.angle,
+      out,
+      cfg.headed,
+    );
+    if (json) out.results.push(json);
   } else if (cfg.page === 'compare') {
     const json = await runChromePage(
       `${base}/bench/compare.html?tokens=${cfg.tokens}`,

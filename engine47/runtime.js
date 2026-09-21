@@ -1,23 +1,22 @@
 import {
-  compileCompute,
   createEmptyStorage,
   createUniform,
 } from '../kernels/gpu.js';
-import { NANO4B, LAYER_TYPES } from './config.js';
-import { loadWeights, q4Meta } from './weights.js';
-import gemvWgsl from '../kernels/matmul_nbits_sg.wgsl?raw';
-import gemv32Wgsl from '../kernels/matmul_nbits_sg32.wgsl?raw';
-import gemvF16Wgsl from '../kernels/matmul_nbits_sg_f16.wgsl?raw';
+import { NANO4B, LAYER_TYPES } from '../engine/config.js';
+import { q4Meta } from '../engine/weights.js';
+import gemvF32Wgsl from '../kernels47/gemv_f32.wgsl?raw';
+import gemvF16Wgsl from '../kernels47/gemv_f16.wgsl?raw';
+import ssdWgsl from '../kernels47/mamba_ssd.wgsl?raw';
 import rmsWgsl from '../kernels/rms.wgsl?raw';
 import addWgsl from '../kernels/add.wgsl?raw';
 import convWgsl from '../kernels/conv1d_update.wgsl?raw';
-import mambaWgsl from '../kernels/mamba2_decode.wgsl?raw';
 import gatedWgsl from '../kernels/gated_group_rms.wgsl?raw';
 import kvWgsl from '../kernels/kv_append.wgsl?raw';
 import attnWgsl from '../kernels/sparse_attn.wgsl?raw';
 import embedWgsl from '../kernels/embed_q4.wgsl?raw';
 import argmaxPartialWgsl from '../kernels/argmax_partial.wgsl?raw';
 import argmaxMergeWgsl from '../kernels/argmax_merge.wgsl?raw';
+import { colsPerWorkgroup, probeSubgroupSize } from './subgroup.js';
 
 const C = NANO4B;
 const INNER = C.mambaHeads * C.mambaHeadDim;
@@ -58,22 +57,37 @@ function gemvName(layer, kind) {
   return `model_layers_${layer}_${kind}_MatMul_weight`;
 }
 
-export class DecodeEngine {
+async function shaderModule(device, code, label) {
+  const module = device.createShaderModule({ label, code });
+  const info = await module.getCompilationInfo();
+  const errors = info.messages.filter((m) => m.type === 'error');
+  if (errors.length) {
+    const text = errors.map((m) => `${m.lineNum}:${m.linePos} ${m.message}`).join('\n');
+    throw new Error(`WGSL compile failed (${label}):\n${text}`);
+  }
+  return module;
+}
+
+function specialize(device, module, label, constants) {
+  return device.createComputePipeline({
+    label,
+    layout: 'auto',
+    compute: { module, entryPoint: 'main', constants },
+  });
+}
+
+export class DecodeEngine47 {
   constructor(gpu, weights) {
     this.gpu = gpu;
     this.device = gpu.device;
     this.W = weights.buffers;
     this.meta = weights.meta;
     this.seq = 0;
+    this.label = 'Grok 4.7';
   }
 
-  static async create(gpu, { onProgress } = {}) {
-    const weights = await loadWeights(gpu.device, { onProgress });
-    return DecodeEngine.fromWeights(gpu, weights);
-  }
-
-  static async fromWeights(gpu, weights) {
-    const eng = new DecodeEngine(gpu, weights);
+  static async create(gpu, weights) {
+    const eng = new DecodeEngine47(gpu, weights);
     await eng._compile();
     eng._alloc();
     eng._bind();
@@ -91,22 +105,38 @@ export class DecodeEngine {
 
   async _compile() {
     const d = this.device;
+    this.subgroupSize = await probeSubgroupSize(d);
+    this.colsPerWg = colsPerWorkgroup(this.subgroupSize);
+    const f32mod = await shaderModule(d, gemvF32Wgsl, 'gemv47-f32');
+    const f16 = d.features.has('shader-f16');
+    const f16mod = f16 ? await shaderModule(d, gemvF16Wgsl, 'gemv47-f16') : null;
+    this.pipelines = new Map();
+    const add = (kind, mod, nb, epilogue) => {
+      const key = `${kind}:${nb}:${epilogue}`;
+      this.pipelines.set(key, specialize(d, mod, key, { N_BLOCKS: nb, EPILOGUE: epilogue }));
+    };
+    for (const nb of [98, 160, 240, 392]) add('f32', f32mod, nb, 0);
+    add('f32', f32mod, 98, 1);
+    if (f16mod) {
+      add('f16', f16mod, 98, 1);
+      add('f16', f16mod, 392, 0);
+    }
+    const compileOne = async (code, label) => {
+      const module = await shaderModule(d, code, label);
+      return d.createComputePipeline({ label, layout: 'auto', compute: { module, entryPoint: 'main' } });
+    };
     this.p = {
-      gemv: (await compileCompute(d, gemvWgsl, 'gemv-sg4')).pipeline,
-      gemv32: (await compileCompute(d, gemv32Wgsl, 'gemv-sg32')).pipeline,
-      gemvF16: d.features.has('shader-f16')
-        ? (await compileCompute(d, gemvF16Wgsl, 'gemv-sg4-f16')).pipeline
-        : null,
-      rms: (await compileCompute(d, rmsWgsl, 'rms')).pipeline,
-      add: (await compileCompute(d, addWgsl, 'add')).pipeline,
-      conv: (await compileCompute(d, convWgsl, 'conv1d')).pipeline,
-      mamba: (await compileCompute(d, mambaWgsl, 'mamba2-decode')).pipeline,
-      gated: (await compileCompute(d, gatedWgsl, 'gated-rms')).pipeline,
-      kv: (await compileCompute(d, kvWgsl, 'kv-append')).pipeline,
-      attn: (await compileCompute(d, attnWgsl, 'gqa')).pipeline,
-      embed: (await compileCompute(d, embedWgsl, 'embed-q4')).pipeline,
-      argmax0: (await compileCompute(d, argmaxPartialWgsl, 'argmax-partial')).pipeline,
-      argmax1: (await compileCompute(d, argmaxMergeWgsl, 'argmax-merge')).pipeline,
+      f16,
+      rms: await compileOne(rmsWgsl, 'rms'),
+      add: await compileOne(addWgsl, 'add'),
+      conv: await compileOne(convWgsl, 'conv1d'),
+      mamba: await compileOne(ssdWgsl, 'mamba2-decode-47'),
+      gated: await compileOne(gatedWgsl, 'gated-rms'),
+      kv: await compileOne(kvWgsl, 'kv-append'),
+      attn: await compileOne(attnWgsl, 'gqa'),
+      embed: await compileOne(embedWgsl, 'embed-q4'),
+      argmax0: await compileOne(argmaxPartialWgsl, 'argmax-partial'),
+      argmax1: await compileOne(argmaxMergeWgsl, 'argmax-merge'),
     };
   }
 
@@ -192,13 +222,8 @@ export class DecodeEngine {
       ['f32', 0],
     ]);
     this.uAdd = uniformU32(d, [C.hidden, 0, 0, 0]);
-    this.uRelu = uniformU32(d, [C.intermediate, 0, 0, 0]);
     this.uConv = uniformU32(d, [C.convDim, 0, 0, 0]);
     this.uMamba = uniformMixed(d, [
-      ['u32', C.mambaHeads],
-      ['u32', C.mambaHeadDim],
-      ['u32', C.ssmState],
-      ['u32', C.headsPerGroup],
       ['f32', C.dtMin],
       ['f32', 0],
       ['f32', 0],
@@ -214,33 +239,28 @@ export class DecodeEngine {
     this.gemvU = new Map();
   }
 
-  gemvParams(K, N, nBlocks, epilogue = 0) {
-    const key = `${K}:${N}:${nBlocks}:${epilogue}`;
-    if (!this.gemvU.has(key)) {
-      this.gemvU.set(key, uniformU32(this.device, [K, N, nBlocks, epilogue]));
-    }
+  gemvParams(N) {
+    const key = N;
+    if (!this.gemvU.has(key)) this.gemvU.set(key, uniformU32(this.device, [N, 0, 0, 0]));
     return this.gemvU.get(key);
   }
 
-  gemvPick(q4) {
-    // Metal: f16 inner product wins mlp_up and mlp_down; sg32 wins other wide K=3136.
-    if (this.p.gemvF16 && q4.N === C.intermediate && q4.K === C.hidden) {
-      return { pipeline: this.p.gemvF16, cols: 4 };
+  gemvPipeline(q4, epilogue) {
+    const mlpUp = q4.N === C.intermediate && q4.K === C.hidden;
+    const mlpDown = q4.K === C.intermediate && q4.N === C.hidden;
+    const kind = this.p.f16 && (mlpUp || mlpDown) ? 'f16' : 'f32';
+    const key = `${kind}:${q4.nBlocks}:${epilogue}`;
+    const pipeline = this.pipelines.get(key);
+    if (!pipeline) {
+      throw new Error(`no gemv pipeline ${key} (N=${q4.N} K=${q4.K})`);
     }
-    if (this.p.gemvF16 && q4.K === C.intermediate && q4.N === C.hidden) {
-      return { pipeline: this.p.gemvF16, cols: 4 };
-    }
-    if (q4.K === C.hidden && q4.N >= 8192 && q4.N < 65536) {
-      return { pipeline: this.p.gemv32, cols: 8 };
-    }
-    return { pipeline: this.p.gemv, cols: 4 };
+    return pipeline;
   }
 
   gemvBg(A, q4, Y, label, epilogue = 0) {
-    const { pipeline, cols } = this.gemvPick(q4);
+    const pipeline = this.gemvPipeline(q4, epilogue);
     return {
       pipeline,
-      cols,
       N: q4.N,
       bg: bg(this.device, pipeline, [
         A,
@@ -248,7 +268,7 @@ export class DecodeEngine {
         q4.scales,
         q4.zp,
         Y,
-        this.gemvParams(q4.K, q4.N, q4.nBlocks, epilogue),
+        this.gemvParams(q4.N),
       ], label),
     };
   }
@@ -339,7 +359,8 @@ export class DecodeEngine {
           residual,
         });
       } else {
-        throw new Error(`unknown layer type ${t} at ${i}`);
+        const unknown = t;
+        throw new Error(`unknown layer type ${unknown} at ${i}`);
       }
     }
 
@@ -356,12 +377,11 @@ export class DecodeEngine {
   }
 
   _setU32(buf, index, value) {
-    const tmp = new Uint32Array([value]);
-    this.device.queue.writeBuffer(buf, index * 4, tmp);
+    this.device.queue.writeBuffer(buf, index * 4, new Uint32Array([value]));
   }
 
   _gemvOp(g, label) {
-    return { p: g.pipeline, bg: g.bg, wg: Math.ceil(g.N / g.cols), label };
+    return { p: g.pipeline, bg: g.bg, wg: Math.ceil(g.N / this.colsPerWg), label };
   }
 
   _ops() {
@@ -382,7 +402,12 @@ export class DecodeEngine {
       } else if (L.type === 'mamba') {
         add(this._gemvOp(L.inn, `L${i}-in`), true);
         add({ p: this.p.conv, bg: L.conv, wg: Math.ceil(C.convDim / 256), label: `L${i}-conv` }, true);
-        add({ p: this.p.mamba, bg: L.ssd, wg: C.mambaHeads * C.mambaHeadDim, label: `L${i}-ssd` }, false);
+        add({
+          p: this.p.mamba,
+          bg: L.ssd,
+          wg: Math.ceil((C.mambaHeads * C.mambaHeadDim) / 256),
+          label: `L${i}-ssd`,
+        }, false);
         add({ p: this.p.gated, bg: L.gated, wg: C.nGroups, label: `L${i}-gated` }, false);
         add(this._gemvOp(L.out, `L${i}-out`), true);
         add({ p: this.p.add, bg: L.residual, wg: Math.ceil(C.hidden / 256), label: `L${i}-add` }, false);
@@ -395,6 +420,9 @@ export class DecodeEngine {
         add({ p: this.p.attn, bg: L.attn, wg: C.heads, label: `L${i}-attn` }, false);
         add(this._gemvOp(L.o, `L${i}-o`), true);
         add({ p: this.p.add, bg: L.residual, wg: Math.ceil(C.hidden / 256), label: `L${i}-add` }, false);
+      } else {
+        const unknown = L.type;
+        throw new Error(`unknown layer type ${unknown}`);
       }
     }
     add({ p: this.p.rms, bg: this.bFinalRms, wg: 1, label: 'final-rms' }, true);
@@ -514,108 +542,6 @@ export class DecodeEngine {
     return ids;
   }
 
-  async readF32(buffer, count) {
-    return new Float32Array(await this._readBytes(buffer, count * 4));
-  }
-
-  async readU32(buffer, count) {
-    return new Uint32Array(await this._readBytes(buffer, count * 4));
-  }
-
-  async _readBytes(buffer, bytes) {
-    const staging = this.device.createBuffer({
-      size: Math.max(bytes, 4),
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(buffer, 0, staging, 0, bytes);
-    this.device.queue.submit([encoder.finish()]);
-    await staging.mapAsync(GPUMapMode.READ);
-    const copy = staging.getMappedRange().slice(0, bytes);
-    staging.unmap();
-    staging.destroy();
-    return copy;
-  }
-
-  _dispatchOps(encoder, ops) {
-    const passes = [];
-    for (const op of ops) {
-      const prev = passes[passes.length - 1];
-      if (!prev || prev[0].batch !== op.batch) passes.push([op]);
-      else prev.push(op);
-    }
-    for (const group of passes) {
-      const pass = encoder.beginComputePass({ label: group[0].label });
-      for (const op of group) {
-        pass.setPipeline(op.p);
-        pass.setBindGroup(0, op.bg);
-        pass.dispatchWorkgroups(op.wg);
-      }
-      pass.end();
-    }
-  }
-
-  /**
-   * Run one token, submitting after each listed op so activations can be read.
-   * Does not copy into tokenLog. Caller owns seq (incremented at the end).
-   */
-  async inspectToken(tokenId, { lmHead = true, checkpoints = [] } = {}) {
-    if (tokenId != null) this._setU32(this.tokenOut, 0, tokenId);
-    this._setU32(this.uKv, 0, this.seq);
-    this._setU32(this.uAttn, 3, this.seq + 1);
-    const ops = lmHead ? this._cachedOps : this._prefillOps;
-    const want = new Set(checkpoints);
-    const dumps = {};
-    const bufFor = {
-      embed: () => this.h,
-      'L0-rms': () => this.hNorm,
-      'L0-in': () => this.mambaIn,
-      'L0-conv': () => this.convOut,
-      'L0-ssd': () => this.ssdY,
-      'L0-gated': () => this.gated,
-      'L0-out': () => this.mixer,
-      'L0-add': () => this.h,
-      'final-rms': () => this.hNorm,
-      'lm-head': () => this.logits,
-      argmax1: () => this.tokenOut,
-    };
-    const countFor = {
-      embed: C.hidden,
-      'L0-rms': C.hidden,
-      'L0-in': C.mambaIn,
-      'L0-conv': C.convDim,
-      'L0-ssd': INNER,
-      'L0-gated': INNER,
-      'L0-out': C.hidden,
-      'L0-add': C.hidden,
-      'final-rms': C.hidden,
-      'lm-head': C.vocab,
-      argmax1: 1,
-    };
-    let pending = [];
-    const flush = async () => {
-      if (!pending.length) return;
-      const encoder = this.device.createCommandEncoder();
-      this._dispatchOps(encoder, pending);
-      this.device.queue.submit([encoder.finish()]);
-      pending = [];
-    };
-    for (const op of ops) {
-      pending.push(op);
-      if (want.has(op.label)) {
-        await flush();
-        const n = countFor[op.label];
-        dumps[op.label] =
-          op.label === 'argmax1'
-            ? await this.readU32(bufFor[op.label](), n)
-            : await this.readF32(bufFor[op.label](), n);
-      }
-    }
-    await flush();
-    this.seq += 1;
-    return dumps;
-  }
-
   reset() {
     this.seq = 0;
     this.outCount = 0;
@@ -649,74 +575,5 @@ export class DecodeEngine {
       this.submitStep(null, { lmHead: true });
     }
     return this.readOutputs();
-  }
-
-  _copyTokenOutToStream(slot) {
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(this.tokenOut, 0, this.streamStaging[slot], 0, 4);
-    this.device.queue.submit([encoder.finish()]);
-  }
-
-  _unmapStream() {
-    for (const buf of this.streamStaging) {
-      try {
-        buf.unmap();
-      } catch {
-        /* not mapped */
-      }
-    }
-  }
-
-  async *generateStream(promptIds, { maxNew = 128, eosIds = [C.eosTokenId] } = {}) {
-    if (!promptIds.length) throw new Error('empty prompt');
-    this.reset();
-    const last = promptIds.length - 1;
-    await this.step(Number(promptIds[0]), { lmHead: last === 0 });
-    for (let i = 1; i < promptIds.length; i++) {
-      this.submitStep(Number(promptIds[i]), { lmHead: i === last });
-    }
-    // Readback of token N overlaps GPU work for token N+1. Serial mapAsync
-    // then submit left the GPU idle and chat showed ~90 tok/s vs 115 bench.
-    let slot = 0;
-    this._copyTokenOutToStream(slot);
-    let pendingMap = this.streamStaging[slot].mapAsync(GPUMapMode.READ);
-    let nextMap = null;
-    try {
-      for (let n = 0; n < maxNew; n++) {
-        const more = n + 1 < maxNew && this.seq < C.maxSeq;
-        const next = slot ^ 1;
-        if (more) {
-          this.submitStep(null, { lmHead: true, streamSlot: next });
-          nextMap = this.streamStaging[next].mapAsync(GPUMapMode.READ);
-        } else {
-          nextMap = null;
-        }
-        await pendingMap;
-        pendingMap = null;
-        const id = new Uint32Array(this.streamStaging[slot].getMappedRange().slice(0, 4))[0];
-        this.streamStaging[slot].unmap();
-        yield id;
-        if (eosIds.includes(id) || !more) break;
-        slot = next;
-        pendingMap = nextMap;
-        nextMap = null;
-      }
-    } finally {
-      if (nextMap) {
-        try {
-          await nextMap;
-        } catch {
-          /* device lost */
-        }
-      }
-      if (pendingMap) {
-        try {
-          await pendingMap;
-        } catch {
-          /* device lost */
-        }
-      }
-      this._unmapStream();
-    }
   }
 }

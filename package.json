@@ -2,7 +2,7 @@
   "name": "nemotron-webgpu-decode",
   "version": "0.1.0",
   "private": true,
-  "description": "From-scratch WebGPU decode for Nemotron 3 Nano 4B q4 in Chrome. Written by Grok 4.6.",
+  "description": "From-scratch WebGPU decode for Nemotron 3 Nano 4B q4 in Chrome. Grok 4.6 engine and a Grok 4.7 schedule beside it.",
   "type": "module",
   "scripts": {
     "dev": "vite",
