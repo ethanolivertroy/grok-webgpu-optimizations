@@ -90,7 +90,60 @@ fn main(
     acc[r] = 0.0;
   }
 
-  for (var blk = tid; blk < n_blocks; blk += WG) {
+  var blk = tid;
+  let step = WG;
+  while (blk + step < n_blocks) {
+    let blk1 = blk + step;
+    let a_base = blk * 8u;
+    let b_base = blk1 * 8u;
+    let a0 = A[a_base + 0u];
+    let a1 = A[a_base + 1u];
+    let a2 = A[a_base + 2u];
+    let a3 = A[a_base + 3u];
+    let a4 = A[a_base + 4u];
+    let a5 = A[a_base + 5u];
+    let a6 = A[a_base + 6u];
+    let a7 = A[a_base + 7u];
+    let b0 = A[b_base + 0u];
+    let b1 = A[b_base + 1u];
+    let b2 = A[b_base + 2u];
+    let b3 = A[b_base + 3u];
+    let b4 = A[b_base + 4u];
+    let b5 = A[b_base + 5u];
+    let b6 = A[b_base + 6u];
+    let b7 = A[b_base + 7u];
+    var p0: array<vec4<u32>, 8>;
+    var s0: array<f32, 8>;
+    var z0: array<f32, 8>;
+    var p1: array<vec4<u32>, 8>;
+    var s1: array<f32, 8>;
+    var z1: array<f32, 8>;
+    for (var r = 0u; r < N_COLS; r++) {
+      let col = col0 + r;
+      if (col < n) {
+        p0[r] = B[col * n_blocks + blk];
+        s0[r] = scales[col * n_blocks + blk];
+        z0[r] = load_zp(col, blk);
+        p1[r] = B[col * n_blocks + blk1];
+        s1[r] = scales[col * n_blocks + blk1];
+        z1[r] = load_zp(col, blk1);
+      }
+    }
+    for (var r = 0u; r < N_COLS; r++) {
+      let col = col0 + r;
+      if (col < n) {
+        acc[r] += dequant_dot(p0[r], s0[r], z0[r], a0, a1, a2, a3, a4, a5, a6, a7);
+      }
+    }
+    for (var r = 0u; r < N_COLS; r++) {
+      let col = col0 + r;
+      if (col < n) {
+        acc[r] += dequant_dot(p1[r], s1[r], z1[r], b0, b1, b2, b3, b4, b5, b6, b7);
+      }
+    }
+    blk += step * 2u;
+  }
+  if (blk < n_blocks) {
     let a_base = blk * 8u;
     let a0 = A[a_base + 0u];
     let a1 = A[a_base + 1u];
