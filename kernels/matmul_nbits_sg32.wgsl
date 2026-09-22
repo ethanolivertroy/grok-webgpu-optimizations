@@ -1,6 +1,7 @@
 // Apple-tuned decode GEMV: one 32-wide subgroup per 8 N-columns.
 // q4 block=32. Zero-points packed 8 per u32. Dispatch ceil(N/8).
 // epilogue=1 applies relu2 on the written columns.
+// A is loaded once per K block. All eight column vec4 loads run before unpack.
 
 enable subgroups;
 
@@ -85,6 +86,22 @@ fn main(
   let col0 = wg.x * N_COLS;
   let n_blocks = params.n_blocks;
   let n = params.N;
+  let c0 = col0 + 0u;
+  let c1 = col0 + 1u;
+  let c2 = col0 + 2u;
+  let c3 = col0 + 3u;
+  let c4 = col0 + 4u;
+  let c5 = col0 + 5u;
+  let c6 = col0 + 6u;
+  let c7 = col0 + 7u;
+  let live0 = c0 < n;
+  let live1 = c1 < n;
+  let live2 = c2 < n;
+  let live3 = c3 < n;
+  let live4 = c4 < n;
+  let live5 = c5 < n;
+  let live6 = c6 < n;
+  let live7 = c7 < n;
   var acc: array<f32, 8>;
   for (var r = 0u; r < N_COLS; r++) {
     acc[r] = 0.0;
@@ -100,14 +117,32 @@ fn main(
     let a5 = A[a_base + 5u];
     let a6 = A[a_base + 6u];
     let a7 = A[a_base + 7u];
-    for (var r = 0u; r < N_COLS; r++) {
-      let col = col0 + r;
-      if (col < n) {
-        let packed = B[col * n_blocks + blk];
-        let scale = scales[col * n_blocks + blk];
-        acc[r] += dequant_dot(packed, scale, load_zp(col, blk), a0, a1, a2, a3, a4, a5, a6, a7);
-      }
-    }
+
+    var p0 = vec4<u32>(0u);
+    var p1 = vec4<u32>(0u);
+    var p2 = vec4<u32>(0u);
+    var p3 = vec4<u32>(0u);
+    var p4 = vec4<u32>(0u);
+    var p5 = vec4<u32>(0u);
+    var p6 = vec4<u32>(0u);
+    var p7 = vec4<u32>(0u);
+    if (live0) { p0 = B[c0 * n_blocks + blk]; }
+    if (live1) { p1 = B[c1 * n_blocks + blk]; }
+    if (live2) { p2 = B[c2 * n_blocks + blk]; }
+    if (live3) { p3 = B[c3 * n_blocks + blk]; }
+    if (live4) { p4 = B[c4 * n_blocks + blk]; }
+    if (live5) { p5 = B[c5 * n_blocks + blk]; }
+    if (live6) { p6 = B[c6 * n_blocks + blk]; }
+    if (live7) { p7 = B[c7 * n_blocks + blk]; }
+
+    if (live0) { acc[0] += dequant_dot(p0, scales[c0 * n_blocks + blk], load_zp(c0, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live1) { acc[1] += dequant_dot(p1, scales[c1 * n_blocks + blk], load_zp(c1, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live2) { acc[2] += dequant_dot(p2, scales[c2 * n_blocks + blk], load_zp(c2, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live3) { acc[3] += dequant_dot(p3, scales[c3 * n_blocks + blk], load_zp(c3, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live4) { acc[4] += dequant_dot(p4, scales[c4 * n_blocks + blk], load_zp(c4, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live5) { acc[5] += dequant_dot(p5, scales[c5 * n_blocks + blk], load_zp(c5, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live6) { acc[6] += dequant_dot(p6, scales[c6 * n_blocks + blk], load_zp(c6, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
+    if (live7) { acc[7] += dequant_dot(p7, scales[c7 * n_blocks + blk], load_zp(c7, blk), a0, a1, a2, a3, a4, a5, a6, a7); }
   }
 
   for (var r = 0u; r < N_COLS; r++) {
