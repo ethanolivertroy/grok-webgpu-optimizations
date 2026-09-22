@@ -141,16 +141,13 @@ It does not invent a new tok/s. Run it on the machine you care about.
 
 What changed:
 
-- GEMV workgroup is 256 threads. Each subgroup owns 8 columns, and every
-  lane walks K. On Metal (subgroup 32) that is 8 subgroups and 64 columns
-  per workgroup. The 4.6 sg4 kernel used those 256 threads for 4 columns,
-  so on K=3136 (98 blocks) most lanes did nothing and then joined a reduce.
-- MLP stays on f16 dots with an f32 sum of blocks, relu2 fused into the
-  up projection. Same policy as 4.6.
+- GEMV keeps the 4.6 per-shape grids. MLP stays on the f16 4-column kernel.
+  Mamba in_proj stays on sg32 (8 columns, 32 threads). Mamba out, attention
+  q/k/v/o, and lm_head stay on sg4. A single 64-column workgroup was slower
+  on MLP and on those sg4 projections, and it did not beat sg32 on in_proj.
 - Mamba SSD is one thread per (head, dim), state in vec4s, no barrier.
-  4.6 launched a 32-thread workgroup per element (7680 per layer).
-- The K split follows the device subgroup width. We still ask for 32
-  when the adapter allows it, which is Metal.
+  4.6 launched a 32-thread workgroup per element (7680 per layer). That
+  launch is the part 4.7 keeps.
 
 ```bash
 node scripts/headless-bench.mjs --page compare --tokens 128 --angle metal

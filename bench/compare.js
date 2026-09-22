@@ -156,7 +156,7 @@ async function main() {
     let err47 = null;
     try {
       e47 = await DecodeEngine47.create(gpu, weights);
-      say(`4.7 subgroup ${e47.subgroupSize} cols/wg ${e47.colsPerWg}`);
+      say(`4.7 gemv ${e47.gemvSchedule}`);
     } catch (e) {
       err47 = e && e.message ? e.message : String(e);
       say('4.7 compile failed: ' + err47);
