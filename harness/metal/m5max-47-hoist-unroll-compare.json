@@ -1,0 +1,64 @@
+{
+  "type": "decode-compare",
+  "date": "2026-09-27",
+  "main": "266151b2ffb4277fb2cfd378470e798df3796bd2",
+  "chrome": "Google Chrome",
+  "angle": "metal",
+  "machine": "MacBook Pro M5 Max, 128 GB",
+  "prompt": "Write a haiku about GPU kernels.",
+  "prompt_tokens": 24,
+  "tokens_requested": 128,
+  "published": {
+    "stock": 69.76,
+    "wall46": 115.04,
+    "gpu46": 142.48,
+    "ms46": 1112.7,
+    "gpuMs46": 7.019
+  },
+  "runs": [
+    {
+      "grok46": {
+        "tokens": 128,
+        "ms": 1402.1,
+        "tokPerSec": 91.29,
+        "gpu_ms": 1345.7,
+        "gpu_samples": 151,
+        "gpu_ms_per_tok": 8.912,
+        "gpu_tokPerSec": 112.21
+      },
+      "grok47": {
+        "tokens": 128,
+        "ms": 1439.4,
+        "tokPerSec": 88.93,
+        "gpu_ms": 1384.8,
+        "gpu_samples": 151,
+        "gpu_ms_per_tok": 9.171,
+        "gpu_tokPerSec": 109.04
+      },
+      "token_agree": 128,
+      "token_match": true
+    },
+    {
+      "grok46": {
+        "tokens": 128,
+        "ms": 1474,
+        "tokPerSec": 86.84,
+        "gpu_ms": 1422.8,
+        "gpu_samples": 151,
+        "gpu_ms_per_tok": 9.422,
+        "gpu_tokPerSec": 106.13
+      },
+      "grok47": {
+        "tokens": 128,
+        "ms": 1473.1,
+        "tokPerSec": 86.89,
+        "gpu_ms": 1420.9,
+        "gpu_samples": 151,
+        "gpu_ms_per_tok": 9.41,
+        "gpu_tokPerSec": 106.27
+      },
+      "token_agree": 128,
+      "token_match": true
+    }
+  ]
+}

@@ -137,7 +137,11 @@ More numbers: [kernels/RESULTS.md](kernels/RESULTS.md).
 Chrome 151, Metal, chat template, 128 greedy tokens.
 
 4.7 uses the same weights, the same greedy loop, and the same bench.
-It does not invent a new tok/s. Run it on the machine you care about.
+The grid restore in #3 is the best measured 4.7 result: 113.36 wall tok/s
+and 140.04 GPU tok/s, ahead of that run's 4.6. Later hoist and unroll
+commits (#4, #5, type fix #6) keep token agreement and do not beat
+same-run 4.6. Numbers and the pass bar:
+[kernels/RESULTS.md](kernels/RESULTS.md).
 
 What changed:
 
@@ -150,9 +154,13 @@ What changed:
   launch is the part 4.7 keeps.
 
 ```bash
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 node scripts/headless-bench.mjs --page compare --tokens 128 --angle metal
 node scripts/headless-bench.mjs --page check --angle swiftshader
 ```
+
+On a Mac, set `CHROME_PATH`. The script otherwise looks in
+`/root/.cache/ms-playwright`.
 
 `check` is a numeric compare of the new GEMV and SSD against a CPU
 reference. It is not a tok/s number. SwiftShader is not either.
